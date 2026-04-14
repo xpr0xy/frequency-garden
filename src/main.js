@@ -123,24 +123,45 @@ function syncUI(playing, isFile) {
 }
 
 // ─── THREE.JS SCENE ───────────────────────────────────────────────────────────
-const positions   = new Float32Array(PARTICLE_COUNT * 3);
-const velocities = new Float32Array(PARTICLE_COUNT * 3);
-const pColors    = new Float32Array(PARTICLE_COUNT * 3);
-const pSizes     = new Float32Array(PARTICLE_COUNT);
+// Orbital physics arrays - each particle has stable orbit that it NEVER leaves
+const positions      = new Float32Array(PARTICLE_COUNT * 3);  // current display position
+const pColors       = new Float32Array(PARTICLE_COUNT * 3);
+const pSizes        = new Float32Array(PARTICLE_COUNT);
+
+// Per-particle orbital data (stored separately, never gets pulled to center)
+const restRadii     = new Float32Array(PARTICLE_COUNT);       // stable orbital radius
+const restAngles    = new Float32Array(PARTICLE_COUNT);       // base angle in orbital plane
+const restHeights   = new Float32Array(PARTICLE_COUNT);        // base height offset
+const angularSpeeds = new Float32Array(PARTICLE_COUNT);       // base angular speed
+
+// Dynamic offsets driven by audio (spring back to 0 each frame)
+const radiusOffsets = new Float32Array(PARTICLE_COUNT);       // bass-driven radius delta
+const heightOffsets = new Float32Array(PARTICLE_COUNT);       // high-driven vertical delta
 
 function initParticles() {
   for (let i = 0; i < PARTICLE_COUNT; i++) {
     const i3 = i * 3;
+    
+    // Stable orbital parameters - each particle has its own orbit
     const theta = Math.random() * Math.PI * 2;
     const phi   = Math.acos(2*Math.random() - 1);
     const r     = 18 + Math.random() * 35;
+    
+    restRadii[i]     = r;
+    restAngles[i]    = theta;
+    restHeights[i]   = r * Math.cos(phi);
+    angularSpeeds[i] = 0.003 + Math.random() * 0.008;
+    
+    // Initialize dynamic offsets to 0 (rest state)
+    radiusOffsets[i] = 0;
+    heightOffsets[i] = 0;
+    
+    // Set initial display positions using spherical coords
     positions[i3]   = r*Math.sin(phi)*Math.cos(theta);
     positions[i3+1] = r*Math.sin(phi)*Math.sin(theta);
     positions[i3+2] = r*Math.cos(phi);
-    velocities[i3]   = (Math.random()-0.5)*0.04;
-    velocities[i3+1] = (Math.random()-0.5)*0.04;
-    velocities[i3+2] = (Math.random()-0.5)*0.04;
-    // subtle idle glow — always visible
+    
+    // Subtle idle glow - always visible
     const t = Math.random();
     pColors[i3]   = 0.05 + t*0.15;
     pColors[i3+1] = 0.50 + t*0.35;
@@ -258,31 +279,52 @@ function animate(time, controls) {
   const energy = (state.bass + state.mid + state.high) / 3;
   const hue    = 0.50 + energy * 0.40;
 
+  // Physics constants
+  const springK      = 0.08;  // spring constant back to rest state
+  const radiusPushMax = 15;    // max bass-driven radius expansion
+  const vertWobbleMax = 8;     // max high-driven vertical oscillation
+
   for (let i = 0; i < PARTICLE_COUNT; i++) {
-    const i3 = i*3;
-    const px = positions[i3], py = positions[i3+1], pz = positions[i3+2];
-    const dx = -px, dy = -py, dz = -pz;
-    const dist = Math.sqrt(dx*dx + dy*dy + dz*dz) + 0.001;
+    const i3 = i * 3;
+    
+    // ── ORBITAL PHYSICS MODEL ──────────────────────────────────────────────
+    // Each particle orbits at its own stable radius. Bass PUSHES outward,
+    // mid INCREASES angular speed, high ADDS vertical wobble.
+    // NO spring force toward center - particles NEVER leave their orbits.
+    
+    // 1. Update dynamic offsets based on audio
+    //    Bass expands orbital radius (outward push from center)
+    const bassDelta = state.bass * radiusPushMax;
+    //    High adds vertical oscillation
+    const highDelta = state.high * vertWobbleMax;
+    
+    // 2. Apply audio forces as delta offsets (additive, not replacements)
+    radiusOffsets[i] += bassDelta * 0.3;
+    heightOffsets[i] += highDelta * Math.sin(time * 0.005 + restAngles[i]) * 0.3;
+    
+    // 3. Spring dynamic offsets back toward 0 (decay back to rest state)
+    radiusOffsets[i] *= (1 - springK);
+    heightOffsets[i] *= (1 - springK * 0.5);
+    
+    // 4. Calculate current orbital parameters
+    const currentRadius = restRadii[i] + radiusOffsets[i];
+    const currentHeight = restHeights[i] + heightOffsets[i];
+    
+    // 5. Update angle - mid energy increases angular speed
+    const angularSpeed = angularSpeeds[i] * (1 + state.mid * 3);
+    restAngles[i] += angularSpeed;
+    
+    // 6. Convert orbital coords to Cartesian for display position
+    //    Using spherical coords: radius + angle in XZ plane, height for Y
+    const x = currentRadius * Math.cos(restAngles[i]);
+    const z = currentRadius * Math.sin(restAngles[i]);
+    const y = currentHeight;
+    
+    posAttr.array[i3]   = x;
+    posAttr.array[i3+1] = y;
+    posAttr.array[i3+2] = z;
 
-    velocities[i3]   += (dx/dist)*state.bass*0.25 + (Math.random()-0.5)*state.mid*0.12;
-    velocities[i3+1] += (dy/dist)*state.bass*0.25 + (Math.random()-0.5)*state.high*0.10;
-    velocities[i3+2] += (dz/dist)*state.mid*0.15  + (Math.random()-0.5)*state.mid*0.08;
-
-    velocities[i3]   *= 0.93;
-    velocities[i3+1] *= 0.93;
-    velocities[i3+2] *= 0.93;
-
-    positions[i3]   += velocities[i3];
-    positions[i3+1] += velocities[i3+1];
-    positions[i3+2] += velocities[i3+2];
-
-    const sD = Math.sqrt(positions[i3]**2 + positions[i3+1]**2 + positions[i3+2]**2);
-    if (sD > 65) {
-      const sc = 55/sD;
-      positions[i3]   *= sc; positions[i3+1] *= sc; positions[i3+2] *= sc;
-      velocities[i3]  *= -0.4; velocities[i3+1] *= -0.4; velocities[i3+2] *= -0.4;
-    }
-
+    // ── COLOR & SIZE ───────────────────────────────────────────────────────
     const [r, g, b] = hslColor(hue, 0.88, 0.52 + energy*0.38);
     colAttr.array[i3]   = r;
     colAttr.array[i3+1] = g;
