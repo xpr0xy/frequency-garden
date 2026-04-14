@@ -3,14 +3,16 @@ import { EffectComposer } from 'postprocessing';
 import { BloomEffect } from 'postprocessing';
 import './style.css';
 
+// === GLOBALS ===
 let scene, camera, renderer, composer, particles, particleGeometry;
 let analyser, audioContext, source, oscNode, gainNode;
 let analyserData, smoothedData;
 let isPlaying = false, isFileMode = false;
 let currentFileUrl = null;
 let animationId;
+let vuBars;
 
-// Particle system
+// === CONSTANTS ===
 const PARTICLE_COUNT = 4000;
 const positions = new Float32Array(PARTICLE_COUNT * 3);
 const velocities = new Float32Array(PARTICLE_COUNT * 3);
@@ -28,6 +30,46 @@ const state = {
   oscWave: 'sine'
 };
 
+// === VU METER ===
+function updateVUMeter(bass, mid, high) {
+  if (!vuBars) return;
+  const levels = [bass, bass, mid, mid, mid, high, high, high];
+  const rgbs = [
+    '127,255,255', '127,255,255', '127,255,255',
+    '127,255,255', '127,255,255',
+    '255,165,0', '255,165,0',
+    '255,68,68'
+  ];
+  vuBars.forEach((bar, i) => {
+    const h = Math.max(4, Math.min(24, levels[i] * 30));
+    bar.style.height = h + 'px';
+    bar.style.background = `rgba(${rgbs[i]}, ${0.3 + levels[i] * 0.7})`;
+  });
+}
+
+// === COLOR MATH ===
+function hslToRgb(h, s, l) {
+  let r, g, b;
+  if (s === 0) { r = g = b = l; }
+  else {
+    const hue2rgb = (p, q, t) => {
+      if (t < 0) t += 1;
+      if (t > 1) t -= 1;
+      if (t < 1/6) return p + (q - p) * 6 * t;
+      if (t < 1/2) return q;
+      if (t < 2/3) return p + (q - p) * (2/3 - t) * 6;
+      return p;
+    };
+    const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+    const p = 2 * l - q;
+    r = hue2rgb(p, q, h + 1/3);
+    g = hue2rgb(p, q, h);
+    b = hue2rgb(p, q, h - 1/3);
+  }
+  return [r, g, b];
+}
+
+// === THREE.JS SETUP ===
 function init() {
   scene = new THREE.Scene();
   scene.fog = new THREE.FogExp2(0x000508, 0.08);
@@ -116,7 +158,9 @@ function initParticles() {
   }
 }
 
+// === AUDIO ===
 function initAudio() {
+  if (audioContext && audioContext.state !== 'closed') return;
   audioContext = new (window.AudioContext || window.webkitAudioContext)();
   analyser = audioContext.createAnalyser();
   analyser.fftSize = 256;
@@ -130,7 +174,7 @@ function initAudio() {
 }
 
 function startOscillator() {
-  if (!audioContext) initAudio();
+  initAudio();
   if (audioContext.state === 'suspended') audioContext.resume();
   if (oscNode) oscNode.stop();
   oscNode = audioContext.createOscillator();
@@ -144,11 +188,11 @@ function startOscillator() {
 }
 
 function loadAudioFile(file) {
-  if (!audioContext) initAudio();
+  initAudio();
   if (audioContext.state === 'suspended') audioContext.resume();
   if (currentFileUrl) URL.revokeObjectURL(currentFileUrl);
   currentFileUrl = URL.createObjectURL(file);
-  if (source) source.disconnect();
+  if (source) { try { source.stop(); } catch(e){} source.disconnect(); }
   source = audioContext.createBufferSource();
   fetch(currentFileUrl)
     .then(res => res.arrayBuffer())
@@ -160,7 +204,8 @@ function loadAudioFile(file) {
       isPlaying = true;
       isFileMode = true;
       updatePlayStateUI(true, true);
-    });
+    })
+    .catch(err => console.error('Audio decode error:', err));
 }
 
 function stopAudio() {
@@ -171,11 +216,12 @@ function stopAudio() {
 }
 
 function toggleAudio() {
-  if (isPlaying) stopAudio();
-  else if (isFileMode && currentFileUrl) {
+  if (isPlaying) { stopAudio(); return; }
+  if (isFileMode && currentFileUrl) {
     loadAudioFile(document.getElementById('audio-file').files[0]);
+  } else {
+    startOscillator();
   }
-  else startOscillator();
 }
 
 function updatePlayStateUI(playing, isFile) {
@@ -183,16 +229,17 @@ function updatePlayStateUI(playing, isFile) {
   const playIcon = document.getElementById('play-icon');
   const oscGroup = document.getElementById('osc-controls');
   if (playing) {
-    playIcon.innerHTML = '⏸';
+    playIcon.innerHTML = '&#9646;&#9646;';
     playBtn.style.borderColor = '#7ff';
   } else {
-    playIcon.innerHTML = '▶';
+    playIcon.innerHTML = '&#9654;';
     playBtn.style.borderColor = '';
   }
-  oscGroup.style.opacity = (playing && !isFileMode) ? '1' : '0.5';
-  oscGroup.style.pointerEvents = (playing && !isFileMode) ? '' : 'none';
+  oscGroup.style.opacity = (playing && !isFile) ? '1' : '0.5';
+  oscGroup.style.pointerEvents = (playing && !isFile) ? '' : 'none';
 }
 
+// === SLIDER UPDATES ===
 function updateOscFreq(val) {
   state.oscFreq = parseFloat(val);
   document.getElementById('osc-freq-label').textContent = Math.round(state.oscFreq) + ' Hz';
@@ -218,9 +265,7 @@ function updateDecay(val) {
 function updateBloom(val) {
   state.bloom = parseFloat(val);
   document.getElementById('bloom-label').textContent = val;
-  if (composer && composer.passes[0]) {
-    composer.passes[0].intensity = state.bloom;
-  }
+  if (composer && composer.passes[0]) composer.passes[0].intensity = state.bloom;
 }
 
 function onResize() {
@@ -230,27 +275,7 @@ function onResize() {
   composer.setSize(window.innerWidth, window.innerHeight);
 }
 
-function hslToRgb(h, s, l) {
-  let r, g, b;
-  if (s === 0) { r = g = b = l; }
-  else {
-    const hue2rgb = (p, q, t) => {
-      if (t < 0) t += 1;
-      if (t > 1) t -= 1;
-      if (t < 1/6) return p + (q - p) * 6 * t;
-      if (t < 1/2) return q;
-      if (t < 2/3) return p + (q - p) * (2/3 - t) * 6;
-      return p;
-    };
-    const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
-    const p = 2 * l - q;
-    r = hue2rgb(p, q, h + 1/3);
-    g = hue2rgb(p, q, h);
-    b = hue2rgb(p, q, h - 1/3);
-  }
-  return [r, g, b];
-}
-
+// === RENDER LOOP ===
 function animate(time) {
   animationId = requestAnimationFrame(animate);
 
@@ -280,17 +305,12 @@ function animate(time) {
   for (let i = 0; i < PARTICLE_COUNT; i++) {
     const i3 = i * 3;
     const px = positions[i3], py = positions[i3 + 1], pz = positions[i3 + 2];
-
     const dx = 50 - px, dy = 50 - py, dz = 50 - pz;
     const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
 
-    const bassForce = state.bass * 0.15;
-    const midForce = state.mid * 0.1;
-    const highForce = state.high * 0.08;
-
-    velocities[i3] += (dx / dist) * bassForce + (Math.random() - 0.5) * state.mid * 0.05;
-    velocities[i3 + 1] += (dy / dist) * bassForce + (Math.random() - 0.5) * state.high * 0.05;
-    velocities[i3 + 2] += (dz / dist) * midForce;
+    velocities[i3] += (dx / dist) * state.bass * 0.15 + (Math.random() - 0.5) * state.mid * 0.05;
+    velocities[i3 + 1] += (dy / dist) * state.bass * 0.15 + (Math.random() - 0.5) * state.high * 0.05;
+    velocities[i3 + 2] += (dz / dist) * state.mid * 0.1;
 
     velocities[i3] *= 0.99;
     velocities[i3 + 1] *= 0.99;
@@ -324,57 +344,34 @@ function animate(time) {
   particles.rotation.x += 0.0005 + state.mid * 0.002;
 
   updateVUMeter(state.bass, state.mid, state.high);
-
   composer.render();
 }
 
-document.addEventListener('DOMContentLoaded', () => {
-  init();
+// === BOOT ===
+vuBars = document.querySelectorAll('.vu-bar');
+init();
 
-  document.getElementById('play-btn').addEventListener('click', toggleAudio);
-  document.getElementById('audio-file').addEventListener('change', (e) => {
-    if (e.target.files[0]) {
-      if (oscNode) { oscNode.stop(); oscNode = null; }
-      loadAudioFile(e.target.files[0]);
-    }
-  });
-  document.getElementById('osc-freq').addEventListener('input', (e) => updateOscFreq(e.target.value));
-  document.querySelectorAll('.wave-btn').forEach(b => {
-    b.addEventListener('click', () => updateOscWave(b.dataset.wave));
-  });
-  document.getElementById('sensitivity').addEventListener('input', (e) => updateSensitivity(e.target.value));
-  document.getElementById('decay').addEventListener('input', (e) => updateDecay(e.target.value));
-  document.getElementById('bloom').addEventListener('input', (e) => updateBloom(e.target.value));
+// === EVENT LISTENERS ===
+document.getElementById('play-btn').addEventListener('click', toggleAudio);
 
-  // File label update
-  document.getElementById('audio-file').addEventListener('change', (e) => {
-    const label = document.getElementById('file-label');
-    if (e.target.files[0]) {
-      label.textContent = e.target.files[0].name;
-    }
-  });
-
-  // VU meter update
-  const vuBars = document.querySelectorAll('.vu-bar');
-  const vuColors = ['#7ff', '#7ff', '#7ff', '#aff', '#aff', '#ffa500', '#ff4444', '#ff4444'];
-
-  function updateVUMeter(bass, mid, high) {
-    const levels = [bass, bass, mid, mid, mid, high, high, high];
-    vuBars.forEach((bar, i) => {
-      const h = Math.max(4, Math.min(24, levels[i] * 30));
-      const isGreen = i < 5, isOrange = i === 5 || i === 6, isRed = i === 7;
-      const rgb = isGreen ? '127,255,255' : isOrange ? '255,165,0' : '255,68,68';
-      bar.style.height = h + 'px';
-      bar.style.background = `rgba(${rgb}, ${0.3 + levels[i] * 0.7})`;
-    });
+document.getElementById('audio-file').addEventListener('change', (e) => {
+  if (e.target.files[0]) {
+    if (oscNode) { oscNode.stop(); oscNode = null; }
+    document.getElementById('file-label').textContent = e.target.files[0].name;
+    loadAudioFile(e.target.files[0]);
   }
-
-  document.getElementById('osc-freq').value = 220;
-  document.getElementById('sensitivity').value = 1.2;
-  document.getElementById('decay').value = 0.92;
-  document.getElementById('bloom').value = 1.8;
-  updateOscFreq(220);
-  updateSensitivity(1.2);
-  updateDecay(0.92);
-  updateBloom(1.8);
 });
+
+document.getElementById('osc-freq').addEventListener('input', (e) => updateOscFreq(e.target.value));
+document.querySelectorAll('.wave-btn').forEach(b => {
+  b.addEventListener('click', () => updateOscWave(b.dataset.wave));
+});
+document.getElementById('sensitivity').addEventListener('input', (e) => updateSensitivity(e.target.value));
+document.getElementById('decay').addEventListener('input', (e) => updateDecay(e.target.value));
+document.getElementById('bloom').addEventListener('input', (e) => updateBloom(e.target.value));
+
+// Set defaults
+updateOscFreq(220);
+updateSensitivity(1.2);
+updateDecay(0.92);
+updateBloom(1.8);
