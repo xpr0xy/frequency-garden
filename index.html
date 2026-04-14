@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang=en>
+<head>
+  <meta charset=UTF-8>
+  <meta name=viewport content=\"width=device-width, initial-scale=1.0, maximum-scale=1.0\">
+  <title>frequency garden — audio reactive visual field</title>
+  <meta name=\"description\" content=\"An audio-reactive generative garden. Feed it sound — from your mic, a file, or the built-in oscillator — and watch the frequencies bloom into particle fields.\">
+  <meta name=\"author\" content=\"pr0xy\">
+  <link rel=\"icon\" type=\"image/svg+xml\" href=\"/favicon.svg\">
+
+  <!-- OG / SEO -->
+  <meta property=\"og:title\" content=\"frequency garden\">
+  <meta property=\"og:description\" content=\"An audio-reactive generative garden. Feed it sound and watch frequencies bloom.\">
+  <meta property=\"og:type\" content=\"website\">
+  <meta property=\"og:url\" content=\"https://frequency.pr0xy.dev\">
+  <meta name=\"twitter:card\" content=\"summary_large_image\">
+  <meta name=\"twitter:title\" content=\"frequency garden\">
+<meta name=twitter:description content=\"Audio-reactive generative visual field. Feed it sound.\">
+
+  <link rel=\"preconnect\" href=\"https://fonts.googleapis.com\">
+  <link rel=\"preconnect\" href=\"https://fonts.gstatic.com\" crossorigin>
+  <link href=\"https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Space+Mono:ital,wght@0,400;0,700;1,400&display=swap\" rel=\"stylesheet\">
+  <link rel=\"stylesheet\" href=/src/style.css>
+</head>
+<body>
+<div id=app>
+  <header>
+    <span class=title>▓▓▓ frequency.garden ▓▓▓</span>
+    <div class=statusbar>
+      <span id=status>idle</span>
+      <span id=mode>waiting</span>
+      <span id=bpm>-- bpm</span>
+    </div>
+  </header>
+
+  <div id=canvas-wrap>
+    <canvas id=canvas></canvas>
+  </div>
+
+  <div id=controls>
+    <div class=control-group>
+      <button id=btn-mic class=btn>
+        <span class=btn-icon>◎</span>
+        <span class=btn-label>microphone</span>
+      </button>
+      <button id=btn-file class=btn>
+        <span class=btn-icon>▷</span>
+        <span class=btn-label>load file</span>
+      </button>
+      <button id=btn-osc class=btn>
+        <span class=btn-icon>◈</span>
+        <span class=btn-label>oscillator</span>
+      </button>
+      <button id=btn-stop class=btn disabled>
+        <span class=btn-icon>■</span>
+        <span class=btn-label>stop</span>
+      </button>
+    </div>
+    <div class=control-group>
+      <div class=slider-wrap>
+        <label for=sensitivity>sensitivity</label>
+        <input type=range id=sensitivity min=0.5 max=4 step=0.05 value=1.8>
+      </div>
+      <div class=slider-wrap>
+        <label for=decay>decay</label>
+        <input type=range id=decay min=0.85 max=0.995 step=0.005 value=0.965>
+      </div>
+      <div class=slider-wrap>
+        <label for=bloom>bloom</label>
+        <input type=range id=bloom min=0 max=1 step=0.05 value=0.4>
+      </div>
+    </div>
+    <div class=control-group>
+      <button id=btn-clear class=btn-ghost>clear garden</button>
+      <button id=btn-info class=btn-ghost>?</button>
+    </div>
+  </div>
+
+  <input type=file id=file-input accept=\"audio/*\" hidden>
+</div>
+<div id=info-overlay class=hidden>
+  <div class=info-box>
+    <h2>frequency.garden</h2>
+    <p>A generative visual field that responds to audio. Low frequencies grow large slow particles. Mids build medium structures. Highs scatter fine dust.</p>
+    <p>Works with: microphone input, any audio file, or the built-in oscillator for testing.</p>
+    <p>Click outside or press any key to close.</p>
+  </div>
+</div>
+<script type=module src=/src/main.js></script>
+</body>
+</html>
