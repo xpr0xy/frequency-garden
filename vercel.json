@@ -1,0 +1,14 @@
+{
+  "projectId": "prj_7PqJ8vu66leH6J5VHsjaciBqh38e",
+  "orgId": "team_AOYnKzKFXDxio8Ipbr06cv0I",
+  "regions": ["iad1"],
+  "buildCommand": "npm run build",
+  "outputDirectory": "dist",
+  "framework": null,
+  "github": {
+    "enabled": true,
+    "autoAlias": true,
+    "silent": false
+  },
+  "alias": ["frequency.pr0xy.dev"]
+}
