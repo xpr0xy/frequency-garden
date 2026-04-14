@@ -1,507 +1,380 @@
-// ═══════════════════════════════════════════════════
-// FREQUENCY GARDEN — Audio Reactive Particle Field
-// ═══════════════════════════════════════════════════
+import * as THREE from 'three';
+import { EffectComposer } from 'postprocessing';
+import { BloomEffect } from 'postprocessing';
+import './style.css';
 
-const canvas = document.getElementById('canvas');
-const ctx = canvas.getContext('2d');
+let scene, camera, renderer, composer, particles, particleGeometry;
+let analyser, audioContext, source, oscNode, gainNode;
+let analyserData, smoothedData;
+let isPlaying = false, isFileMode = false;
+let currentFileUrl = null;
+let animationId;
 
-// State
-let audioCtx = null;
-let analyser = null;
-let freqData = null;
-let source = null;
-let isPlaying = false;
-let oscNode = null;
-let fileSource = null;
-let analyserNode = null;
+// Particle system
+const PARTICLE_COUNT = 4000;
+const positions = new Float32Array(PARTICLE_COUNT * 3);
+const velocities = new Float32Array(PARTICLE_COUNT * 3);
+const colors = new Float32Array(PARTICLE_COUNT * 3);
+const sizes = new Float32Array(PARTICLE_COUNT);
 
-// Garden particles
-const particles = [];
-const MAX_PARTICLES = 1200;
+const state = {
+  sensitivity: 1.2,
+  decay: 0.92,
+  bloom: 1.8,
+  bass: 0,
+  mid: 0,
+  high: 0,
+  oscFreq: 220,
+  oscWave: 'sine'
+};
 
-// Tweakables
-const sensitivity = { value: 1.8 };
-const decayRate = { value: 0.965 };
-const bloomAmount = { value: 0.4 };
+function init() {
+  scene = new THREE.Scene();
+  scene.fog = new THREE.FogExp2(0x000508, 0.08);
 
-// Colors
-const PALETTE = [
-  { r: 0, g: 229, b: 255 },   // cyan
-  { r: 0, g: 255, b: 136 },   // green
-  { r: 255, g: 107, b: 53 },   // orange
-  { r: 0, g: 180, b: 220 },   // sky
-  { r: 120, g: 220, b: 180 }, // mint
-];
+  camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+  camera.position.z = 50;
 
-// ─── Canvas ────────────────────────────────────────
-let W, H;
-function resize() {
-  const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  W = window.innerWidth;
-  H = window.innerHeight;
-  canvas.width = W * dpr;
-  canvas.height = H * dpr;
-  canvas.style.width = W + 'px';
-  canvas.style.height = H + 'px';
-  ctx.scale(dpr, dpr);
-}
-resize();
-window.addEventListener('resize', resize);
+  renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.setClearColor(0x000508, 1);
+  document.getElementById('canvas-container').appendChild(renderer.domElement);
 
-// ─── Particle System ────────────────────────────────
-class Particle {
-  constructor(x, y, type, intensity) {
-    this.x = x;
-    this.y = y;
-    this.type = type; // 'bass' | 'mid' | 'high'
-    this.intensity = intensity;
-    this.age = 0;
-    this.maxAge = this._maxAge();
-    this.color = PALETTE[Math.floor(Math.random() * PALETTE.length)];
-    this.alpha = 0;
-    this.scale = 0;
-    this.vx = (Math.random() - 0.5) * this._speed();
-    this.vy = (Math.random() - 0.5) * this._speed() - this._drift();
-    this.angle = Math.random() * Math.PI * 2;
-    this.angleSpeed = (Math.random() - 0.5) * 0.04;
-    this.rot = 0;
-    this.growing = true;
-    this.shape = Math.floor(Math.random() * 3); // 0=circle, 1=petal, 2=hex
-    this.ring = false;
-    this.ringRadius = 0;
-  }
+  const bloomEffect = new BloomEffect({
+    intensity: state.bloom,
+    luminanceThreshold: 0.1,
+    luminanceSmoothing: 0.9,
+    mipmapBlur: true
+  });
 
-  _speed() {
-    if (this.type === 'bass') return 0.3;
-    if (this.type === 'mid') return 0.8;
-    return 2.5;
-  }
+  composer = new EffectComposer(renderer);
+  composer.addPass(bloomEffect);
 
-  _maxAge() {
-    if (this.type === 'bass') return 180 + Math.random() * 120;
-    if (this.type === 'mid') return 90 + Math.random() * 60;
-    return 40 + Math.random() * 30;
-  }
+  particleGeometry = new THREE.BufferGeometry();
+  initParticles();
+  particleGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  particleGeometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+  particleGeometry.setAttribute('size', new THREE.BufferAttribute(sizes, 1));
 
-  _drift() {
-    if (this.type === 'bass') return 0.15;
-    if (this.type === 'mid') return 0.3;
-    return 0.5;
-  }
-
-  _size() {
-    const base = this.type === 'bass' ? 14 : this.type === 'mid' ? 7 : 3;
-    return base * (0.5 + this.intensity * 0.8);
-  }
-
-  update() {
-    this.age++;
-    this.x += this.vx;
-    this.y += this.vy;
-    this.vy += 0.003; // gentle gravity
-    this.vx *= 0.998;
-    this.vy *= 0.998;
-    this.angle += this.angleSpeed;
-    this.rot += this.angleSpeed * 0.3;
-
-    if (this.growing) {
-      this.scale = Math.min(this.scale + 0.08, 1);
-      this.alpha = Math.min(this.alpha + 0.06, this.intensity * 0.85);
-      if (this.scale >= 1) this.growing = false;
-    } else {
-      this.alpha *= decayRate.value;
-    }
-
-    // Bloom ring for bass
-    if (this.type === 'bass' && this.intensity > 0.5 && !this.ring) {
-      if (Math.random() < 0.01) {
-        this.ring = true;
-        this.ringRadius = 0;
+  const particleMaterial = new THREE.ShaderMaterial({
+    uniforms: { uTime: { value: 0 } },
+    vertexShader: `
+      attribute float size;
+      attribute vec3 color;
+      varying vec3 vColor;
+      varying float vAlpha;
+      uniform float uTime;
+      void main() {
+        vColor = color;
+        vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+        float dist = length(mvPosition.xyz);
+        vAlpha = smoothstep(80.0, 20.0, dist);
+        gl_PointSize = size * (300.0 / -mvPosition.z);
+        gl_Position = projectionMatrix * mvPosition;
       }
-    }
-    if (this.ring) {
-      this.ringRadius += 1.5;
-      if (this.ringRadius > this._size() * 4) this.ring = false;
-    }
-  }
-
-  draw() {
-    if (this.alpha < 0.01) return;
-    const size = this._size() * this.scale;
-    const { r, g, b } = this.color;
-    const a = this.alpha;
-
-    ctx.save();
-    ctx.translate(this.x, this.y);
-    ctx.rotate(this.rot);
-    ctx.globalAlpha = a;
-
-    if (this.ring) {
-      ctx.strokeStyle = `rgba(${r},${g},${b},${a * 0.3})`;
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.arc(0, 0, this.ringRadius, 0, Math.PI * 2);
-      ctx.stroke();
-    }
-
-    // Glow
-    if (bloomAmount.value > 0) {
-      const grd = ctx.createRadialGradient(0, 0, 0, 0, 0, size * (1 + bloomAmount.value));
-      grd.addColorStop(0, `rgba(${r},${g},${b},${a * 0.4 * bloomAmount.value})`);
-      grd.addColorStop(1, `rgba(${r},${g},${b},0)`);
-      ctx.fillStyle = grd;
-      ctx.beginPath();
-      ctx.arc(0, 0, size * (1 + bloomAmount.value * 2), 0, Math.PI * 2);
-      ctx.fill();
-    }
-
-    ctx.fillStyle = `rgba(${r},${g},${b},${a})`;
-
-    if (this.shape === 0) {
-      ctx.beginPath();
-      ctx.arc(0, 0, size, 0, Math.PI * 2);
-      ctx.fill();
-    } else if (this.shape === 1) {
-      // Petal
-      for (let i = 0; i < 4; i++) {
-        ctx.beginPath();
-        ctx.ellipse(0, 0, size * 0.4, size, i * Math.PI / 4, 0, Math.PI * 2);
-        ctx.fill();
+    `,
+    fragmentShader: `
+      varying vec3 vColor;
+      varying float vAlpha;
+      void main() {
+        float d = length(gl_PointCoord - 0.5);
+        float alpha = smoothstep(0.5, 0.1, d) * vAlpha;
+        gl_FragColor = vec4(vColor, alpha);
       }
-    } else {
-      // Hex
-      ctx.beginPath();
-      for (let i = 0; i < 6; i++) {
-        const a2 = i * Math.PI / 3;
-        i === 0 ? ctx.moveTo(Math.cos(a2)*size, Math.sin(a2)*size)
-                : ctx.lineTo(Math.cos(a2)*size, Math.sin(a2)*size);
-      }
-      ctx.closePath();
-      ctx.fill();
-    }
+    `,
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending
+  });
 
-    ctx.restore();
-  }
+  particles = new THREE.Points(particleGeometry, particleMaterial);
+  scene.add(particles);
 
-  isDead() {
-    return this.alpha < 0.008 || this.age > this.maxAge || this.y > H + 50 || this.x < -50 || this.x > W + 50;
+  window.addEventListener('resize', onResize);
+  animate();
+}
+
+function initParticles() {
+  for (let i = 0; i < PARTICLE_COUNT; i++) {
+    const theta = Math.random() * Math.PI * 2;
+    const phi = Math.acos(2 * Math.random() - 1);
+    const r = 20 + Math.random() * 30;
+    positions[i * 3] = r * Math.sin(phi) * Math.cos(theta);
+    positions[i * 3 + 1] = r * Math.sin(phi) * Math.sin(theta);
+    positions[i * 3 + 2] = r * Math.cos(phi);
+
+    velocities[i * 3] = (Math.random() - 0.5) * 0.02;
+    velocities[i * 3 + 1] = (Math.random() - 0.5) * 0.02;
+    velocities[i * 3 + 2] = (Math.random() - 0.5) * 0.02;
+
+    const t = Math.random();
+    colors[i * 3] = 0.1 + t * 0.4;
+    colors[i * 3 + 1] = 0.6 + t * 0.3;
+    colors[i * 3 + 2] = 0.9 - t * 0.5;
+    sizes[i] = 0.5 + Math.random() * 1.5;
   }
 }
 
-// ─── Spawn Particles from FFT ───────────────────────
-let lastSpawnTime = 0;
+function initAudio() {
+  audioContext = new (window.AudioContext || window.webkitAudioContext)();
+  analyser = audioContext.createAnalyser();
+  analyser.fftSize = 256;
+  analyserData = new Uint8Array(analyser.frequencyBinCount);
+  smoothedData = new Float32Array(analyser.frequencyBinCount).fill(0);
 
-function spawnFromFFT(timestamp) {
-  if (!analyser || !isPlaying) return;
-  if (timestamp - lastSpawnTime < 16) return; // ~60fps spawn
-  lastSpawnTime = timestamp;
-
-  analyser.getByteFrequencyData(freqData);
-  const len = freqData.length;
-  const nyquist = audioCtx ? audioCtx.sampleRate / 2 : 22050;
-  const binSize = nyquist / len;
-
-  // Partition: bass < 200Hz, mid 200-2000Hz, high > 2000Hz
-  let bassSum = 0, bassCount = 0;
-  let midSum = 0, midCount = 0;
-  let highSum = 0, highCount = 0;
-
-  for (let i = 0; i < len; i++) {
-    const freq = i * binSize;
-    const v = freqData[i] / 255;
-    if (freq < 200) { bassSum += v; bassCount++; }
-    else if (freq < 2000) { midSum += v; midCount++; }
-    else { highSum += v; highCount++; }
-  }
-
-  const bassAvg = bassCount ? bassSum / bassCount : 0;
-  const midAvg = midCount ? midSum / midCount : 0;
-  const highAvg = highCount ? highSum / highCount : 0;
-
-  // Spawn based on intensity
-  const spawnCount = Math.floor(1 + bassAvg * 3 + midAvg * 2 + highAvg * 4);
-  for (let i = 0; i < spawnCount && particles.length < MAX_PARTICLES; i++) {
-    const cx = W / 2 + (Math.random() - 0.5) * W * 0.6;
-    const cy = H / 2 + (Math.random() - 0.5) * H * 0.4;
-    const r = Math.random();
-    let type, avg, intensity;
-    if (bassAvg > 0.1 && r < 0.15 + bassAvg * 0.3) {
-      type = 'bass'; avg = bassAvg; intensity = bassAvg * sensitivity.value;
-    } else if (midAvg > 0.08 && r < 0.5) {
-      type = 'mid'; avg = midAvg; intensity = midAvg * sensitivity.value;
-    } else {
-      type = 'high'; avg = highAvg; intensity = highAvg * sensitivity.value;
-    }
-    if (intensity > 0.05) {
-      particles.push(new Particle(cx, cy, type, Math.min(intensity, 1)));
-    }
-  }
-
-  // Update BPM estimate
-  updateBPM(bassAvg);
+  gainNode = audioContext.createGain();
+  gainNode.gain.value = 0.4;
+  gainNode.connect(analyser);
+  analyser.connect(audioContext.destination);
 }
 
-// ─── BPM Detection ─────────────────────────────────
-let lastBassTime = 0;
-let bassIntervals = [];
-
-function updateBPM(intensity) {
-  const now = performance.now();
-  if (intensity > 0.5) {
-    if (now - lastBassTime > 200) {
-      bassIntervals.push(now - lastBassTime);
-      if (bassIntervals.length > 8) bassIntervals.shift();
-      lastBassTime = now;
-    }
-  }
-  if (bassIntervals.length >= 4) {
-    const avgInterval = bassIntervals.reduce((a,b)=>a+b,0) / bassIntervals.length;
-    const bpm = Math.round(60000 / avgInterval);
-    if (bpm > 60 && bpm < 200) {
-      document.getElementById('bpm').textContent = bpm + ' bpm';
-    }
-  }
-}
-
-// ─── Render Loop ────────────────────────────────────
-let frameCount = 0;
-
-function draw(timestamp) {
-  requestAnimationFrame(draw);
-
-  frameCount++;
-
-  // Background fade
-  ctx.fillStyle = 'rgba(6, 8, 16, 0.18)';
-  ctx.fillRect(0, 0, W, H);
-
-  // Grid lines (very subtle)
-  if (frameCount % 60 === 0 && particles.length < 50) {
-    ctx.strokeStyle = 'rgba(0, 229, 255, 0.03)';
-    ctx.lineWidth = 1;
-    const step = 40;
-    for (let x = 0; x < W; x += step) {
-      ctx.beginPath();
-      ctx.moveTo(x, 0);
-      ctx.lineTo(x, H);
-      ctx.stroke();
-    }
-    for (let y = 0; y < H; y += step) {
-      ctx.beginPath();
-      ctx.moveTo(0, y);
-      ctx.lineTo(W, y);
-      ctx.stroke();
-    }
-  }
-
-  spawnFromFFT(timestamp);
-
-  // Update and draw particles
-  for (let i = particles.length - 1; i >= 0; i--) {
-    particles[i].update();
-    particles[i].draw();
-    if (particles[i].isDead()) particles.splice(i, 1);
-  }
-
-  // Center glow when playing
-  if (isPlaying) {
-    const grd = ctx.createRadialGradient(W/2, H/2, 0, W/2, H/2, Math.min(W, H) * 0.35);
-    grd.addColorStop(0, 'rgba(0, 229, 255, 0.03)');
-    grd.addColorStop(1, 'rgba(0, 229, 255, 0)');
-    ctx.fillStyle = grd;
-    ctx.fillRect(0, 0, W, H);
-  }
-}
-
-requestAnimationFrame(draw);
-
-// ─── Audio Setup ───────────────────────────────────
-function getAudioContext() {
-  if (!audioCtx) {
-    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    analyser = audioCtx.createAnalyser();
-    analyser.fftSize = 512;
-    analyser.smoothingTimeConstant = 0.75;
-    analyserNode = analyser;
-    freqData = new Uint8Array(analyser.frequencyBinCount);
-    analyser.connect(audioCtx.destination);
-  }
-  if (audioCtx.state === 'suspended') audioCtx.resume();
-  return audioCtx;
-}
-
-function stopAll() {
-  if (oscNode) { try { oscNode.stop(); } catch(e){} oscNode = null; }
-  if (fileSource) { try { fileSource.stop(); } catch(e){} fileSource = null; }
-  if (source) { source.disconnect(); source = null; }
-  isPlaying = false;
-  document.getElementById('status').textContent = 'idle';
-  document.getElementById('mode').textContent = 'stopped';
-  document.getElementById('bpm').textContent = '-- bpm';
-  bassIntervals = [];
-}
-
-// ─── Buttons ───────────────────────────────────────
-const btnMic = document.getElementById('btn-mic');
-const btnFile = document.getElementById('btn-file');
-const btnOsc = document.getElementById('btn-osc');
-const btnStop = document.getElementById('btn-stop');
-const fileInput = document.getElementById('file-input');
-
-let micStream = null;
-
-btnMic.addEventListener('click', async () => {
-  if (isPlaying && source && source.mediaStream) {
-    // Toggle off
-    stopAll();
-    if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
-    btnMic.classList.remove('active');
-    return;
-  }
-
-  try {
-    stopAll();
-    const ctx2 = getAudioContext();
-    micStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-    source = ctx2.createMediaStreamSource(micStream);
-    source.connect(analyser);
-    isPlaying = true;
-    btnMic.classList.add('active');
-    document.getElementById('status').textContent = 'live';
-    document.getElementById('mode').textContent = 'mic';
-  } catch(e) {
-    document.getElementById('status').textContent = 'denied';
-    console.error(e);
-  }
-});
-
-btnFile.addEventListener('click', () => {
-  if (isPlaying) { stopAll(); btnFile.classList.remove('active'); }
-  else fileInput.click();
-});
-
-fileInput.addEventListener('change', async () => {
-  const file = fileInput.files[0];
-  if (!file) return;
-  try {
-    stopAll();
-    const ctx2 = getAudioContext();
-    const buf = await file.arrayBuffer();
-    const audioBuffer = await ctx2.decodeAudioData(buf);
-    const bufSource = ctx2.createBufferSource();
-    bufSource.buffer = audioBuffer;
-    bufSource.connect(analyser);
-    bufSource.start();
-    fileSource = bufSource;
-    isPlaying = true;
-    btnFile.classList.add('active');
-    document.getElementById('status').textContent = 'playing';
-    document.getElementById('mode').textContent = file.name.slice(0, 18);
-    bufSource.onended = () => { stopAll(); btnFile.classList.remove('active'); };
-  } catch(e) {
-    document.getElementById('status').textContent = 'error';
-    console.error(e);
-  }
-});
-
-btnOsc.addEventListener('click', () => {
-  if (isPlaying) { stopAll(); btnOsc.classList.remove('active'); return; }
-  stopAll();
-  const ctx2 = getAudioContext();
-  const osc = ctx2.createOscillator();
-  const lfo = ctx2.createOscillator();
-  const lfoGain = ctx2.createGain();
-  const oscGain = ctx2.createGain();
-
-  osc.type = 'sawtooth';
-  osc.frequency.value = 110;
-
-  lfo.type = 'sine';
-  lfo.frequency.value = 0.8;
-  lfoGain.gain.value = 0.7;
-
-  lfo.connect(lfoGain);
-  lfoGain.connect(osc.frequency);
-  osc.connect(oscGain);
-  oscGain.connect(analyser);
-  oscGain.gain.value = 0.5;
-
-  osc.start();
-  lfo.start();
-
-  oscNode = osc;
+function startOscillator() {
+  if (!audioContext) initAudio();
+  if (audioContext.state === 'suspended') audioContext.resume();
+  if (oscNode) oscNode.stop();
+  oscNode = audioContext.createOscillator();
+  oscNode.type = state.oscWave;
+  oscNode.frequency.value = state.oscFreq;
+  oscNode.connect(gainNode);
+  oscNode.start();
   isPlaying = true;
-  btnOsc.classList.add('active');
-  document.getElementById('status').textContent = 'live';
-  document.getElementById('mode').textContent = 'oscillator';
-});
-
-btnStop.addEventListener('click', () => {
-  stopAll();
-  if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
-  [btnMic, btnFile, btnOsc].forEach(b => b.classList.remove('active'));
-});
-
-btnStop.disabled = false;
-
-// ─── Sliders ───────────────────────────────────────
-document.getElementById('sensitivity').addEventListener('input', e => {
-  sensitivity.value = parseFloat(e.target.value);
-});
-
-document.getElementById('decay').addEventListener('input', e => {
-  decayRate.value = parseFloat(e.target.value);
-});
-
-document.getElementById('bloom').addEventListener('input', e => {
-  bloomAmount.value = parseFloat(e.target.value);
-});
-
-// ─── Clear ─────────────────────────────────────────
-document.getElementById('btn-clear').addEventListener('click', () => {
-  particles.length = 0;
-  bassIntervals = [];
-  document.getElementById('bpm').textContent = '-- bpm';
-});
-
-// ─── Info ──────────────────────────────────────────
-const infoOverlay = document.getElementById('info-overlay');
-document.getElementById('btn-info').addEventListener('click', () => {
-  infoOverlay.classList.remove('hidden');
-});
-
-infoOverlay.addEventListener('click', (e) => {
-  if (e.target === infoOverlay) infoOverlay.classList.add('hidden');
-});
-
-document.addEventListener('keydown', (e) => {
-  infoOverlay.classList.add('hidden');
-});
-
-// ─── Keyboard shortcuts ────────────────────────────
-// m = mic, o = osc, s = stop, f = file
-document.addEventListener('keydown', (e) => {
-  if (e.target.tagName === 'INPUT') return;
-  if (e.key === 'm' || e.key === 'M') btnMic.click();
-  if (e.key === 'o' || e.key === 'O') btnOsc.click();
-  if (e.key === 's' || e.key === 'S') btnStop.click();
-  if (e.key === 'f' || e.key === 'F') btnFile.click();
-  if (e.key === 'c' || e.key === 'C') particles.length = 0;
-});
-
-// Initial state
-document.getElementById('status').textContent = 'ready';
-document.getElementById('mode').textContent = 'waiting';
-
-// Draw initial seed particles for visual interest
-for (let i = 0; i < 8; i++) {
-  const p = new Particle(
-    W/2 + (Math.random()-0.5)*W*0.5,
-    H/2 + (Math.random()-0.5)*H*0.3,
-    ['bass','mid','high'][Math.floor(Math.random()*3)],
-    0.15
-  );
-  p.alpha = 0.3;
-  p.scale = 0.5;
-  particles.push(p);
+  isFileMode = false;
+  updatePlayStateUI(true, false);
 }
+
+function loadAudioFile(file) {
+  if (!audioContext) initAudio();
+  if (audioContext.state === 'suspended') audioContext.resume();
+  if (currentFileUrl) URL.revokeObjectURL(currentFileUrl);
+  currentFileUrl = URL.createObjectURL(file);
+  if (source) source.disconnect();
+  source = audioContext.createBufferSource();
+  fetch(currentFileUrl)
+    .then(res => res.arrayBuffer())
+    .then(buffer => audioContext.decodeAudioData(buffer))
+    .then(decoded => {
+      source.buffer = decoded;
+      source.connect(analyser);
+      source.start(0);
+      isPlaying = true;
+      isFileMode = true;
+      updatePlayStateUI(true, true);
+    });
+}
+
+function stopAudio() {
+  if (oscNode) { oscNode.stop(); oscNode = null; }
+  if (source) { try { source.stop(); } catch(e){} source.disconnect(); }
+  isPlaying = false;
+  updatePlayStateUI(false, isFileMode);
+}
+
+function toggleAudio() {
+  if (isPlaying) stopAudio();
+  else if (isFileMode && currentFileUrl) {
+    loadAudioFile(document.getElementById('audio-file').files[0]);
+  }
+  else startOscillator();
+}
+
+function updatePlayStateUI(playing, isFile) {
+  const playBtn = document.getElementById('play-btn');
+  const playIcon = document.getElementById('play-icon');
+  const oscGroup = document.getElementById('osc-controls');
+  if (playing) {
+    playIcon.innerHTML = '⏸';
+    playBtn.style.borderColor = '#7ff';
+  } else {
+    playIcon.innerHTML = '▶';
+    playBtn.style.borderColor = '';
+  }
+  oscGroup.style.opacity = (playing && !isFileMode) ? '1' : '0.5';
+  oscGroup.style.pointerEvents = (playing && !isFileMode) ? '' : 'none';
+}
+
+function updateOscFreq(val) {
+  state.oscFreq = parseFloat(val);
+  document.getElementById('osc-freq-label').textContent = Math.round(state.oscFreq) + ' Hz';
+  if (oscNode) oscNode.frequency.setTargetAtTime(state.oscFreq, audioContext.currentTime, 0.01);
+}
+
+function updateOscWave(wave) {
+  state.oscWave = wave;
+  if (oscNode) oscNode.type = wave;
+  document.querySelectorAll('.wave-btn').forEach(b => b.classList.toggle('active', b.dataset.wave === wave));
+}
+
+function updateSensitivity(val) {
+  state.sensitivity = parseFloat(val);
+  document.getElementById('sensitivity-label').textContent = val;
+}
+
+function updateDecay(val) {
+  state.decay = parseFloat(val);
+  document.getElementById('decay-label').textContent = val;
+}
+
+function updateBloom(val) {
+  state.bloom = parseFloat(val);
+  document.getElementById('bloom-label').textContent = val;
+  if (composer && composer.passes[0]) {
+    composer.passes[0].intensity = state.bloom;
+  }
+}
+
+function onResize() {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  composer.setSize(window.innerWidth, window.innerHeight);
+}
+
+function hslToRgb(h, s, l) {
+  let r, g, b;
+  if (s === 0) { r = g = b = l; }
+  else {
+    const hue2rgb = (p, q, t) => {
+      if (t < 0) t += 1;
+      if (t > 1) t -= 1;
+      if (t < 1/6) return p + (q - p) * 6 * t;
+      if (t < 1/2) return q;
+      if (t < 2/3) return p + (q - p) * (2/3 - t) * 6;
+      return p;
+    };
+    const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+    const p = 2 * l - q;
+    r = hue2rgb(p, q, h + 1/3);
+    g = hue2rgb(p, q, h);
+    b = hue2rgb(p, q, h - 1/3);
+  }
+  return [r, g, b];
+}
+
+function animate(time) {
+  animationId = requestAnimationFrame(animate);
+
+  if (analyser) {
+    analyser.getByteFrequencyData(analyserData);
+    const binCount = analyser.frequencyBinCount;
+    const bassEnd = Math.floor(binCount * 0.1);
+    const midEnd = Math.floor(binCount * 0.5);
+
+    let bassSum = 0, midSum = 0, highSum = 0;
+    for (let i = 0; i < binCount; i++) {
+      const val = analyserData[i] / 255;
+      smoothedData[i] = smoothedData[i] * state.decay + val * (1 - state.decay);
+      if (i < bassEnd) bassSum += smoothedData[i];
+      else if (i < midEnd) midSum += smoothedData[i];
+      else highSum += smoothedData[i];
+    }
+    state.bass = (bassSum / bassEnd) * state.sensitivity;
+    state.mid = (midSum / (midEnd - bassEnd)) * state.sensitivity;
+    state.high = (highSum / (binCount - midEnd)) * state.sensitivity;
+  }
+
+  const posAttr = particleGeometry.attributes.position;
+  const colAttr = particleGeometry.attributes.color;
+  const sizeAttr = particleGeometry.attributes.size;
+
+  for (let i = 0; i < PARTICLE_COUNT; i++) {
+    const i3 = i * 3;
+    const px = positions[i3], py = positions[i3 + 1], pz = positions[i3 + 2];
+
+    const dx = 50 - px, dy = 50 - py, dz = 50 - pz;
+    const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+
+    const bassForce = state.bass * 0.15;
+    const midForce = state.mid * 0.1;
+    const highForce = state.high * 0.08;
+
+    velocities[i3] += (dx / dist) * bassForce + (Math.random() - 0.5) * state.mid * 0.05;
+    velocities[i3 + 1] += (dy / dist) * bassForce + (Math.random() - 0.5) * state.high * 0.05;
+    velocities[i3 + 2] += (dz / dist) * midForce;
+
+    velocities[i3] *= 0.99;
+    velocities[i3 + 1] *= 0.99;
+    velocities[i3 + 2] *= 0.99;
+
+    positions[i3] += velocities[i3];
+    positions[i3 + 1] += velocities[i3 + 1];
+    positions[i3 + 2] += velocities[i3 + 2];
+
+    const sphereDist = Math.sqrt(positions[i3]**2 + positions[i3+1]**2 + positions[i3+2]**2);
+    if (sphereDist > 60) {
+      const scale = 50 / sphereDist;
+      positions[i3] *= scale; positions[i3+1] *= scale; positions[i3+2] *= scale;
+      velocities[i3] *= -0.5; velocities[i3+1] *= -0.5; velocities[i3+2] *= -0.5;
+    }
+
+    const energy = (state.bass + state.mid + state.high) / 3;
+    const hue = 0.52 + energy * 0.35;
+    const [r, g, b] = hslToRgb(hue, 0.9, 0.55 + energy * 0.3);
+    colAttr.array[i3] = r;
+    colAttr.array[i3 + 1] = g;
+    colAttr.array[i3 + 2] = b;
+    sizeAttr.array[i] = (0.8 + energy * 3) * (0.5 + Math.random() * 0.5);
+  }
+
+  posAttr.needsUpdate = true;
+  colAttr.needsUpdate = true;
+  sizeAttr.needsUpdate = true;
+
+  particles.rotation.y += 0.001 + state.bass * 0.003;
+  particles.rotation.x += 0.0005 + state.mid * 0.002;
+
+  updateVUMeter(state.bass, state.mid, state.high);
+
+  composer.render();
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  init();
+
+  document.getElementById('play-btn').addEventListener('click', toggleAudio);
+  document.getElementById('audio-file').addEventListener('change', (e) => {
+    if (e.target.files[0]) {
+      if (oscNode) { oscNode.stop(); oscNode = null; }
+      loadAudioFile(e.target.files[0]);
+    }
+  });
+  document.getElementById('osc-freq').addEventListener('input', (e) => updateOscFreq(e.target.value));
+  document.querySelectorAll('.wave-btn').forEach(b => {
+    b.addEventListener('click', () => updateOscWave(b.dataset.wave));
+  });
+  document.getElementById('sensitivity').addEventListener('input', (e) => updateSensitivity(e.target.value));
+  document.getElementById('decay').addEventListener('input', (e) => updateDecay(e.target.value));
+  document.getElementById('bloom').addEventListener('input', (e) => updateBloom(e.target.value));
+
+  // File label update
+  document.getElementById('audio-file').addEventListener('change', (e) => {
+    const label = document.getElementById('file-label');
+    if (e.target.files[0]) {
+      label.textContent = e.target.files[0].name;
+    }
+  });
+
+  // VU meter update
+  const vuBars = document.querySelectorAll('.vu-bar');
+  const vuColors = ['#7ff', '#7ff', '#7ff', '#aff', '#aff', '#ffa500', '#ff4444', '#ff4444'];
+
+  function updateVUMeter(bass, mid, high) {
+    const levels = [bass, bass, mid, mid, mid, high, high, high];
+    vuBars.forEach((bar, i) => {
+      const h = Math.max(4, Math.min(24, levels[i] * 30));
+      const isGreen = i < 5, isOrange = i === 5 || i === 6, isRed = i === 7;
+      const rgb = isGreen ? '127,255,255' : isOrange ? '255,165,0' : '255,68,68';
+      bar.style.height = h + 'px';
+      bar.style.background = `rgba(${rgb}, ${0.3 + levels[i] * 0.7})`;
+    });
+  }
+
+  document.getElementById('osc-freq').value = 220;
+  document.getElementById('sensitivity').value = 1.2;
+  document.getElementById('decay').value = 0.92;
+  document.getElementById('bloom').value = 1.8;
+  updateOscFreq(220);
+  updateSensitivity(1.2);
+  updateDecay(0.92);
+  updateBloom(1.8);
+});
